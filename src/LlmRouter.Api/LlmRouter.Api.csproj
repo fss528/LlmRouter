@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UserSecretsId>6a87ce1a-3764-4335-b7a7-48a96b1ea65a</UserSecretsId>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.5" />
+    <PackageReference Include="Scalar.AspNetCore" Version="2.14.9" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\LlmRouter.Core\LlmRouter.Core.csproj" />
+    <ProjectReference Include="..\LlmRouter.Infrastructure\LlmRouter.Infrastructure.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,66 @@
+﻿@LlmRouter_HostAddress = https://localhost:7225
+@Model = gemini-2.5-flash
+
+# Chat body quick reference:
+# - model: logical model name. The router uses it to find compatible providers.
+# - messages: provider-neutral conversation history.
+# - role: usually user, assistant, or system.
+# - content: text sent to the LLM.
+# - maxTokens: optional completion token limit.
+# - temperature: optional randomness value between 0 and 2.
+# - strategy: LeastLatency, RoundRobin, or PriorityWithFallback.
+### Built-in health check
+GET {{LlmRouter_HostAddress}}/health
+
+### Provider health snapshots
+GET {{LlmRouter_HostAddress}}/health/providers
+Accept: application/json
+
+### OpenAPI document
+GET {{LlmRouter_HostAddress}}/openapi/v1.json
+Accept: application/json
+
+### Chat smoke test - Gemini
+POST {{LlmRouter_HostAddress}}/v1/chat
+Content-Type: application/json
+Accept: application/json
+
+{
+  "model": "{{Model}}",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Explain in three concise bullets what problem a multi-provider LLM router solves."
+    }
+  ],
+  "maxTokens": 200,
+  "temperature": 0.2,
+  "strategy": "PriorityWithFallback"
+}
+
+### Validation failure example
+POST {{LlmRouter_HostAddress}}/v1/chat
+Content-Type: application/json
+Accept: application/json
+
+{
+  "model": "{{Model}}",
+  "messages": [],
+  "maxTokens": 200
+}
+
+### Unsupported model example
+POST {{LlmRouter_HostAddress}}/v1/chat
+Content-Type: application/json
+Accept: application/json
+
+{
+  "model": "unsupported-model",
+  "messages": [
+    {
+      "role": "user",
+      "content": "hello"
+    }
+  ]
+}
+
