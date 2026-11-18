@@ -3,379 +3,205 @@
 [![CI](https://github.com/fss528/LlmRouter/actions/workflows/ci.yml/badge.svg)](https://github.com/fss528/LlmRouter/actions/workflows/ci.yml)
 ![.NET](https://img.shields.io/badge/.NET-10-512BD4)
 ![License](https://img.shields.io/badge/license-MIT-green)
-![Architecture](https://img.shields.io/badge/architecture-clean--architecture-blue)A production-oriented **multi-provider LLM request router** built with **C# / .NET 10**.
+![Architecture](https://img.shields.io/badge/architecture-clean--architecture-blue)
 
-This project is intentionally designed as a portfolio-grade backend system: it favors clean architecture, reliability patterns, testability, and explicit tradeoff documentation over feature breadth.
+A multi-provider **LLM request gateway and router** built with **C# / .NET 10** and Clean Architecture.
 
-## Why this exists
+`LlmRouter` decouples applications from single AI model vendors by exposing unified provider-neutral (`/v1/chat`, `/v1/chat/stream`) and OpenAI-compatible (`/v1/chat/completions`) endpoints across **Anthropic**, **OpenAI**, and **Google Gemini**—complete with logical model aliasing, cross-provider fallback, cost-aware and P95-latency routing, SSE streaming with TTFT tracking, single-flight half-open circuit breakers, Redis distributed state, and OpenTelemetry observability.
 
-Modern AI products should not be tightly coupled to a single model vendor. Providers can fail, throttle, change pricing, deprecate model names, or behave differently across regions and accounts.
-
-`LlmRouter` exposes one provider-agnostic chat API and routes each request across Anthropic, OpenAI, and Google Gemini adapters using health, latency, circuit state, and caller-selected strategy.
-
-In practical terms, a multi-provider LLM router helps with:
-
-- **Reliability:** if one provider is unhealthy or rate-limited, traffic can fall back to another compatible provider.
-- **Cost and performance control:** routing strategies can prefer lower latency, explicit priority, or round-robin distribution.
-- **Vendor independence:** provider-specific auth, payloads, model names, and response parsing stay behind adapter boundaries.
-
-## What this demonstrates
-
-- Clean Architecture boundaries with a dependency-free Core project
-- Provider adapter pattern for external LLM APIs
-- Strategy pattern for request routing
-- Ordered fallback orchestration
-- Circuit breaker design
-- Sliding-window error-rate tracking
-- P95 latency tracking
-- Thread-safe in-memory state with C# `Lock`
-- ASP.NET Core Minimal APIs
-- `IHttpClientFactory` typed clients
-- Background health checking with staggered startup
-- OpenAPI and Scalar API reference UI
-- Unit tests with xUnit + NSubstitute
-- Integration tests with `WebApplicationFactory`
-- Operational tradeoff documentation
+---
 
 ## Architecture
 
-```text
-Client / Scalar UI / .http file
-  |
-  | POST /v1/chat
-  v
-+-------------------+
-| LlmRouter.Api     |
-| Minimal API DTOs  |
-+---------+---------+
-          |
-          | ChatRequest domain model
-          v
-+-------------------+        +---------------------------+
-| ChatService       |------->| ProviderRouter            |
-| orchestration     |        | model filter              |
-| ordered fallback  |        | circuit filter            |
-+---------+---------+        | strategy ordering         |
-          |                  +-------------+-------------+
-          |                                |
-          | success/failure                | health snapshots
-          v                                v
-+-------------------+        +---------------------------+
-| IHealthTracker    |<-------| InMemoryHealthTracker     |
-| RecordSuccess     |        | 5-min sliding windows     |
-| RecordFailure     |        | P95 latency, circuit      |
-+---------+---------+        +---------------------------+
-          ^
-          |
-+---------+---------+
-| HealthChecker     |
-| staggered polling |
-+---------+---------+
-          |
-          v
-+--------------------+    +----------------+    +----------------+
-| AnthropicProvider  |    | OpenAiProvider |    | GeminiProvider |
-| wire/auth mapping  |    | wire/auth map  |    | parts mapping  |
-+--------------------+    +----------------+    +----------------+
+```mermaid
+flowchart LR
+    Client["Client / OpenAI SDK / Scalar UI"] -->|"HTTP JSON / SSE"| Middleware["Gateway Middleware\n(API Key Auth, Rate Limiter)"]
+    Middleware --> Endpoints["Minimal API Endpoints\n(/v1/chat, /v1/chat/stream,\n/v1/chat/completions, /v1/models)"]
+    Endpoints --> ChatService["ChatService\n(Timeouts, Fallback, Cost,\nTTFT, OTel Spans/Metrics)"]
+
+    ChatService --> Router["ProviderRouter\n(Aliases, Circuit Filter,\nHealthy Tiering, Strategies)"]
+    Router --> Strategies["Routing Strategies\nLeastLatency | LowestCost |\nRoundRobin | PriorityWithFallback"]
+
+    ChatService -->|"RecordSuccess / RecordFailure"| Tracker{{"IHealthTracker"}}
+    Router -->|"GetHealth / TryAcquireHalfOpenProbe"| Tracker
+    HealthChecker["HealthCheckerService\n(Staggered Background Polling)"] -->|"UpdateHealth"| Tracker
+
+    Tracker -.-> InMem["InMemoryHealthTracker\n(C# Lock + 5m Sliding Window)"]
+    Tracker -.-> Redis["RedisHealthTracker\n(Atomic Lua Scripts)"]
+
+    ChatService --> Providers["ILlmProvider Adapters"]
+    Providers --> Anthropic["AnthropicProvider\n(/v1/messages)"]
+    Providers --> OpenAI["OpenAiProvider\n(/v1/chat/completions)"]
+    Providers --> Gemini["GeminiProvider\n(:generateContent + x-goog-api-key)"]
+    Providers -.-> Demo["SimulatedProvider\n(DemoMode Fault Injection)"]
+
+    ChatService -.->|"OTLP gRPC"| OTel["OpenTelemetry\n(Aspire Dashboard / Collector)"]
 ```
 
-## Tech stack
+---
 
-- .NET 10 / ASP.NET Core Minimal APIs
-- C# with nullable reference types enabled
-- Native ASP.NET Core OpenAPI
-- Scalar API Reference UI
-- `IHttpClientFactory`
-- ASP.NET Core health checks
-- xUnit + NSubstitute
-- `WebApplicationFactory` integration tests
+## Key Capabilities
 
-## Project structure
+- **Logical Model Aliasing & Cross-Provider Fallbacks:** Route by capability tiers (`fast`, `balanced`, `reasoning`, `chat-default`) or concrete model IDs with configurable cross-provider fallback chains (`ModelRoutingCatalog`).
+- **4 Routing Strategies:**
+  - `LeastLatency`: orders healthy measured candidates by sliding-window **P95 latency** (unhealthy or cold-start unmeasured providers never hijack traffic from fast measured providers).
+  - `LowestCost`: selects the lowest estimated USD token cost per 1M input/output tokens, breaking ties by latency.
+  - `RoundRobin`: rotates evenly across request scopes via singleton atomic `IRoundRobinState`.
+  - `PriorityWithFallback`: preserves explicit catalog / DI priority order.
+- **Resilience & Single-Flight Circuit Breaker:**
+  - Opens at `> 50%` error rate over a 5-minute sliding window (`>= 5` requests), cools down for 30s, and enforces **single-flight `HalfOpen` probing** (`TryAcquireHalfOpenProbe`) to prevent recovery thundering herds.
+  - Separates non-retriable client payload errors (`400`/`422` `ProviderClientException`) from transient/provider faults (`429`, `5xx`, timeouts, `401`/`403`) so bad user prompts never trip provider circuit breakers.
+- **SSE Streaming & TTFT Measurement:** True Server-Sent Events across Anthropic, OpenAI, and Gemini (`POST /v1/chat/stream`), with transparent failover *before* the first token is committed to the client and **Time-To-First-Token (TTFT)** instrumentation.
+- **OpenAI-Compatible Surface:** Drop-in `POST /v1/chat/completions` (JSON + SSE `stream: true`) supporting `X-Routing-Strategy` header and `X-LlmRouter-*` telemetry response headers.
+- **Dual State Store (`InMemory` & `Redis`):** Dependency-free `InMemoryHealthTracker` using .NET `Lock` + `TimeProvider`, or multi-replica `RedisHealthTracker` using cluster-safe atomic Lua scripts.
+- **Observability & Gateway Controls:** Built-in `ActivitySource` + `Meter` instruments exported via **OpenTelemetry** (traces, tokens, USD cost, fallbacks, latency & TTFT histograms), fixed-window rate limiting, and optional constant-time API key authentication.
+
+---
+
+## Project Structure
 
 ```text
 LlmRouter/
 ├── LlmRouter.sln
-├── NuGet.config
-├── README.md
-├── LICENSE
-├── .env.example
+├── Dockerfile
+├── docker-compose.yml
+├── docs/
+│   └── adr/                              # Architecture Decision Records
+├── benchmarks/
+│   └── LlmRouter.Benchmarks/             # BenchmarkDotNet microbenchmarks
 ├── src/
-│   ├── LlmRouter.Core/            # Pure domain; no external NuGet dependencies
-│   ├── LlmRouter.Infrastructure/  # Provider adapters + background health checks
-│   └── LlmRouter.Api/             # Minimal API, DI, DTOs, OpenAPI/Scalar
+│   ├── LlmRouter.Core/                   # Pure domain & routing engine (0 NuGet dependencies)
+│   ├── LlmRouter.Infrastructure/         # Provider adapters, Redis Lua tracker, Simulated demo mode
+│   └── LlmRouter.Api/                    # Minimal API, OpenAI compat, SSE, OTel, Scalar/OpenAPI
 └── tests/
-    └── LlmRouter.Tests/           # Unit + integration tests
+    └── LlmRouter.Tests/                  # 60 unit & WebApplicationFactory integration tests
 ```
 
-## Key design decisions and tradeoffs
+---
 
-### Strategy pattern for routing
+## Quick Start: 1-Command Docker Demo (No API Keys Required)
 
-`ProviderRouter` delegates ordering to internal routing strategy implementations:
+Run the full stack (**LlmRouter in DemoMode + Redis + .NET Aspire OpenTelemetry Dashboard**) with one command:
 
-- `LeastLatency` orders by observed P95 latency.
-- `RoundRobin` rotates with `Interlocked.Increment`.
-- `PriorityWithFallback` preserves DI registration order.
+```bash
+docker compose up --build
+```
 
-**Tradeoff:** more classes than a single switch statement, but strategies are isolated and testable.
+Once running:
+- **Scalar API UI:** `http://localhost:8080/scalar/v1`
+- **Aspire Telemetry Dashboard (Traces & Metrics):** `http://localhost:18888`
 
-### Router returns an ordered list, not one provider
+### Trigger a live cross-provider failover
 
-`IProviderRouter.Resolve` returns `IReadOnlyList<ILlmProvider>`. `ChatService` owns fallback execution.
+Send a request to the `"fast"` tier while injecting a simulated `429 TooManyRequests` on `Gemini`:
 
-**Tradeoff:** the caller has slightly more responsibility, but routing policy and retry/fallback behavior remain separate and easy to test.
+```bash
+curl -X POST http://localhost:8080/v1/chat \
+  -H "Content-Type: application/json" \
+  -H "X-Simulate-Failure: Gemini" \
+  -d '{
+    "model": "fast",
+    "messages": [{"role": "user", "content": "Explain circuit breakers in two sentences."}],
+    "strategy": "PriorityWithFallback"
+  }'
+```
 
-### Circuit breaker thresholds
+`LlmRouter` automatically fails over from `Gemini` (`gemini-2.5-flash`) to `OpenAI` (`gpt-4o-mini`), returns `attempts` showing the 429 + fallback, updates Redis circuit metrics, and emits the full distributed trace to the Aspire Dashboard.
 
-The in-memory breaker opens when error rate is greater than 50% with at least 5 requests in the 5-minute window. It moves to `HalfOpen` after 30 seconds and closes after one successful half-open request.
+---
 
-**Tradeoff:** simple and explainable. A production platform would likely tune thresholds per provider/model and include quota, cost, and tenant signals.
-
-### Thread-safety and multi-instance limitation
-
-`InMemoryHealthTracker` uses C# `Lock` objects around per-provider critical sections.
-
-**Tradeoff:** fast and dependency-free for a single process. Multi-instance deployments should replace it with Redis or another shared state store.
-
-### Staggered health check startup
-
-`HealthCheckerService` delays provider `i` by `i * 2000ms` before first polling.
-
-**Tradeoff:** avoids a startup thundering herd, but the final provider's first signal is delayed by a few seconds.
-
-## Running locally
+## Running Locally with Real Provider Keys
 
 ### Prerequisites
 
-- .NET SDK 10+
-- At least one provider API key
+- [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0)
+- One or more provider API keys (`GEMINI_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`)
 
-### Configuration
-
-Prefer environment variables or user secrets for local development. Never commit real API keys.
+### Configure & Run
 
 ```powershell
 $env:GEMINI_API_KEY = "your-gemini-key"
 $env:OPENAI_API_KEY = "your-openai-key"
 $env:ANTHROPIC_API_KEY = "your-anthropic-key"
-```
 
-There is also an `.env.example` file documenting the expected names.
-
-### Build and test
-
-```powershell
 dotnet restore .\LlmRouter.sln
-dotnet build .\LlmRouter.sln --no-restore
-dotnet test .\LlmRouter.sln --no-build
-```
-
-### Run the API
-
-```powershell
+dotnet build .\LlmRouter.sln --configuration Release --no-restore
+dotnet test .\LlmRouter.sln --configuration Release --no-build
 dotnet run --project .\src\LlmRouter.Api\LlmRouter.Api.csproj
 ```
 
-Visual Studio launch profiles use:
+Interactive API documentation is available at `https://localhost:7225/scalar/v1` (or `http://localhost:5136/scalar/v1`), and sample requests live in [LlmRouter.Api.http](src/LlmRouter.Api/LlmRouter.Api.http).
 
-- `https://localhost:7225`
-- `http://localhost:5136`
+---
 
-## Trying the API
+## API Reference
 
-### Chat request body reference
+| Endpoint | Description |
+|---|---|
+| `POST /v1/chat` | Provider-neutral chat completion with cost estimation and `attempts` trace |
+| `POST /v1/chat/stream` | Server-Sent Events (`text/event-stream`) with TTFT and final usage/cost `done` event |
+| `POST /v1/chat/completions` | OpenAI-compatible chat completions (`stream: false` and `stream: true`) |
+| `GET /v1/models` | Discovers logical tiers (`fast`, `balanced`, `reasoning`, `chat-default`), fallback chains, and pricing |
+| `GET /health/providers` | Live per-provider health, `CircuitState`, P95 latency, sample count, and 5-min error rate |
+| `GET /health` | ASP.NET Core readiness/liveness check (includes Redis check when enabled) |
+| `GET /openapi/v1.json` & `/scalar/v1` | OpenAPI spec & interactive Scalar reference |
 
-`POST /v1/chat` accepts a provider-neutral JSON body. Clients never send provider-specific payloads; each adapter translates this contract to the target provider.
+### Logical Model Tiers (Default Catalog)
 
-| Property | Required | Example | Meaning |
-|---|---:|---|---|
-| `model` | Yes | `"gemini-2.5-flash"` | Logical model requested by the client. The router uses it to filter providers whose `SupportedModels` contain that value. |
-| `messages` | Yes | `[{"role":"user","content":"Hello"}]` | Conversation messages in a provider-neutral format. The adapter converts them to each provider's wire format. |
-| `messages[].role` | Yes | `"user"` | Message role. Common values are `user`, `assistant`, and `system`. Gemini maps assistant-style responses to `model` internally. |
-| `messages[].content` | Yes | `"Explain this in 3 bullets"` | Text content sent to the model. |
-| `maxTokens` | No | `200` | Upper bound for generated completion tokens when the provider supports it. If omitted, providers use their adapter default. |
-| `temperature` | No | `0.2` | Sampling randomness. Lower values are more deterministic; higher values are more creative. The API validates `0 <= temperature <= 2`. |
-| `strategy` | No | `"PriorityWithFallback"` | Routing strategy. Defaults to `LeastLatency` when omitted. Supported values: `LeastLatency`, `RoundRobin`, `PriorityWithFallback`. |
+| Alias | Ordered Targets |
+|---|---|
+| `fast` | `Gemini:gemini-2.5-flash` → `OpenAI:gpt-4o-mini` → `Anthropic:claude-haiku-4-5-20251001` |
+| `balanced` | `OpenAI:gpt-4o` → `Anthropic:claude-sonnet-4-20250514` → `Gemini:gemini-2.5-flash` |
+| `reasoning` | `Anthropic:claude-opus-4-20250514` → `Gemini:gemini-2.5-pro` → `OpenAI:gpt-4o` |
+| `chat-default` | `Gemini:gemini-2.5-flash` → `OpenAI:gpt-4o-mini` → `Anthropic:claude-haiku-4-5-20251001` |
 
-Example:
+Aliases, cross-provider fallback chains, and per-1M-token USD pricing are extensible via the `Routing` configuration section in `appsettings.json`.
 
-```json
-{
-  "model": "gemini-2.5-flash",
-  "messages": [
-    {
-      "role": "user",
-      "content": "Explain in three concise bullets what problem a multi-provider LLM router solves."
-    }
-  ],
-  "maxTokens": 200,
-  "temperature": 0.2,
-  "strategy": "PriorityWithFallback"
-}
-```
+---
 
-Strategy behavior:
+## Performance Benchmarks
 
-- `LeastLatency`: tries providers ordered by observed P95 latency.
-- `RoundRobin`: rotates the first provider across compatible candidates.
-- `PriorityWithFallback`: preserves DI registration order: Anthropic, OpenAI, Gemini.
-
-### Option 1: Scalar UI
-
-Run the API and open:
-
-```text
-https://localhost:7225/scalar/v1
-```
-
-The raw OpenAPI document is available at:
-
-```text
-https://localhost:7225/openapi/v1.json
-```
-
-### Option 2: Visual Studio `.http` file
-
-Open and run requests from:
-
-```text
-src/LlmRouter.Api/LlmRouter.Api.http
-```
-
-### Option 3: PowerShell smoke test with Gemini
-
-Windows PowerShell 5.1 may send non-UTF-8 request bodies when text contains accents. This example explicitly sends UTF-8 bytes:
+Measured with [BenchmarkDotNet](benchmarks/LlmRouter.Benchmarks/RouterBenchmarks.cs) on `.NET 10.0.12` (`X64 RyuJIT x86-64-v3`, Intel Core Ultra 7 155H, `ShortRun` job):
 
 ```powershell
-$body = @{ model = "gemini-2.5-flash"; messages = @( @{ role = "user"; content = "Explain in three concise bullets what problem a multi-provider LLM router solves." } ); maxTokens = 200; temperature = 0.2; strategy = "PriorityWithFallback" } | ConvertTo-Json -Depth 5; $utf8Body = [System.Text.Encoding]::UTF8.GetBytes($body); Invoke-RestMethod -Uri https://localhost:7225/v1/chat -Method Post -ContentType "application/json; charset=utf-8" -Body $utf8Body
+dotnet run -c Release --project benchmarks/LlmRouter.Benchmarks/LlmRouter.Benchmarks.csproj -- --job short --filter *RouterBenchmarks*
 ```
 
-Sample response shape:
+| Method | Mean | StdDev | Allocated |
+|---|---:|---:|---:|
+| `HealthTracker_RecordAndSnapshot` | 1.304 μs | 0.031 μs | 2.27 KB |
+| `Resolve_PriorityWithFallback` | 3.779 μs | 0.181 μs | 5.33 KB |
+| `Resolve_RoundRobin` | 4.404 μs | 0.479 μs | 6.00 KB |
+| `Resolve_LowestCost` | 5.183 μs | 0.041 μs | 6.61 KB |
+| `Resolve_LeastLatency` | 5.453 μs | 0.114 μs | 6.52 KB |
 
-```json
-{
-  "id": "c75008500d284c2285a6533354153369",
-  "model": "gemini-2.5-flash",
-  "provider": "Gemini",
-  "content": "A multi-provider LLM router solves...",
-  "usage": {
-    "promptTokens": 18,
-    "completionTokens": 254,
-    "totalTokens": 272
-  },
-  "latencyMs": 8233
-}
-```
+Routing and health tracking add **< 6 microseconds** of overhead per request—negligible relative to 200–2,000 ms upstream LLM inference latencies.
 
-### Provider health
+---
 
-```powershell
-Invoke-RestMethod https://localhost:7225/health/providers | Format-Table
-```
+## Architecture Decision Records
 
-Example after a few real Gemini requests:
+Design decisions and tradeoffs are documented in [docs/adr/](docs/adr/):
 
-```text
-providerName isHealthy p95LatencyMs errorRateLast5Min circuitState
------------- --------- ------------ ----------------- ------------
-Anthropic        False            0                 0 Closed
-Gemini            True          948              0.14 Closed
-OpenAI           False            0                 0 Closed
-```
+- [ADR 0001: Ordered Route Resolution and Logical Model Aliasing](docs/adr/0001-ordered-fallback-and-model-aliasing.md)
+- [ADR 0002: Custom Circuit Breaker with Single-Flight Half-Open Probing](docs/adr/0002-circuit-breaker-half-open-single-flight.md)
+- [ADR 0003: Dual In-Memory and Redis Atomic Lua Health State Store](docs/adr/0003-in-memory-vs-redis-health-state.md)
+- [ADR 0004: SSE Streaming Fallback Boundary and TTFT Instrumentation](docs/adr/0004-sse-streaming-fallback-boundary.md)
 
-`Anthropic` and `OpenAI` are expected to be unhealthy if their keys are not configured.
+---
 
-## API behavior
+## Test Suite
 
-- `POST /v1/chat`
-  - `200` with `ChatResponse` when a provider succeeds.
-  - `400` for validation failures, malformed JSON, or unsupported model.
-  - `503` ProblemDetails when every resolved provider fails.
-- `GET /health/providers`
-  - `200` with `ProviderHealth[]`.
-- `GET /health`
-  - ASP.NET Core built-in health checks.
-- `GET /openapi/v1.json`
-  - OpenAPI document.
-- `GET /scalar/v1`
-  - Interactive API reference UI.
-
-## Provider priority
-
-DI registration order is the explicit priority for `PriorityWithFallback`:
-
-1. AnthropicProvider
-2. OpenAiProvider
-3. GeminiProvider
-
-Current Gemini chat model aliases supported by the adapter include:
-
-- `gemini-2.5-flash`
-- `gemini-2.5-pro`
-- `gemini-2.0-flash`
-- `gemini-2.0-flash-lite`
-- `gemini-flash-latest`
-- `gemini-pro-latest`
-
-If Google returns `429 Too Many Requests`, the router is working and the provider is rejecting the call because of quota/rate limits. If Google returns `404 Not Found`, the requested model is not available for the API key/project/version.
-
-## Known limitations
-
-- Health state is in-memory and not shared across instances.
-- No authentication or per-client authorization yet.
-- No request queueing or retry budget.
-- No streaming responses yet.
-- No persistent metrics/tracing store.
-- No cost accounting per provider/model.
-- Provider adapters implement only the chat-style surface needed by this project.
-
-## Publication and security notes
-
-This repository is intended to be safe for public GitHub publication:
-
-- Real provider API keys must be supplied through environment variables, user secrets, or a local-only configuration file.
-- `.env`, local appsettings variants, build output, logs, and IDE state are ignored by `.gitignore`.
-- `.env.example` documents required variable names without storing secrets.
-- The CI pipeline restores, builds, and tests the solution without requiring any real provider credentials.
-
-Before pushing publicly, run a final secret check:
-
-```powershell
-git grep -n "AIza\|sk-\|ANTHROPIC_API_KEY\|OPENAI_API_KEY\|GEMINI_API_KEY" -- . ':!README.md' ':!.env.example'
-```
-
-The command may show variable names in source or documentation; it should never show real key values.
-## Tradeoffs and future work
-
-| Decision | Tradeoff | Future improvement |
-|---|---|---|
-| In-memory health state | Lost on restart and not shared across replicas | Redis-backed state for multi-instance deployments |
-| Fixed 30s poll interval | May be stale or too chatty | Adaptive interval based on error rate and traffic |
-| Health check = real provider call | Consumes API quota | Dedicated probes or low-cost model checks |
-| No request queueing | Simple and low latency | Async queue + retry budget for bursty traffic |
-| No authentication/authorization | Easy local demo | API keys, OAuth/JWT, per-client quotas |
-| No streaming responses | Simpler abstraction | SSE/chunked streaming adapters |
-| No cost tracking | Keeps domain focused | Token-cost accounting by provider/model |
-| No admin UI | API-only surface | Operator dashboard for health and routing controls |
-
-## Test coverage
-
-The test suite covers:
-
-- Provider filtering by model support
-- Circuit-open provider exclusion
-- Least-latency ordering
-- Round-robin rotation
-- Unsupported model failures
-- All-open circuit fallback behavior
-- Circuit open/half-open/closed transitions
-- P95 latency calculation
-- ChatService success, fallback, all-fail, cancellation, and provider-aware diagnostics
-- Gemini model support
-- Minimal API integration behavior for chat, provider health, OpenAPI, and invalid JSON handling
+The solution includes 60 unit and integration tests covering:
+- Logical model resolution, cross-provider fallback chains, and `UnsupportedModelException`
+- All 4 routing strategies (`LeastLatency`, `LowestCost`, `RoundRobin` across scopes, `PriorityWithFallback`)
+- Sliding-window expiry, P95 latency, cold-start/unhealthy isolation, single-flight `HalfOpen` gating, and concurrent thread-safety
+- Non-retriable `400`/`422` client error isolation vs `429`/`5xx`/timeout failover
+- Wire-level `HttpMessageHandler` verification for Anthropic, OpenAI, and Gemini (including `x-goog-api-key` header hygiene and SSE chunk parsing)
+- `RedisHealthTracker` Lua snapshot parsing and atomic probe locking
+- `HealthCheckerService` staggered polling
+- End-to-end Minimal API integration tests (`WebApplicationFactory`) for `/v1/chat`, `/v1/chat/stream`, `/v1/chat/completions`, `/v1/models`, `/health/providers`, `/openapi/v1.json`, gateway API key auth, and rate limiting
 
 ## License
 
 MIT. See [LICENSE](LICENSE).
-
-
