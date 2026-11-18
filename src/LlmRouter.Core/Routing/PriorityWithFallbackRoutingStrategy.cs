@@ -5,8 +5,11 @@ namespace LlmRouter.Core.Routing;
 
 internal sealed class PriorityWithFallbackRoutingStrategy : IRoutingStrategy
 {
-    public IReadOnlyList<ILlmProvider> Order(IReadOnlyList<ILlmProvider> providers, ChatRequest request)
+    public IReadOnlyList<ProviderRoute> Order(
+        IReadOnlyList<ProviderRoute> routes,
+        IReadOnlyDictionary<string, ProviderHealth> healthByProvider,
+        ChatRequest request)
     {
-        return providers;
+        return routes;
     }
 }

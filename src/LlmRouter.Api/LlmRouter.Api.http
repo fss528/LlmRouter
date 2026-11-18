@@ -1,14 +1,15 @@
 ﻿@LlmRouter_HostAddress = https://localhost:7225
-@Model = gemini-2.5-flash
+@Model = fast
 
 # Chat body quick reference:
-# - model: logical model name. The router uses it to find compatible providers.
+# - model: logical tier ("fast", "balanced", "reasoning", "chat-default") or concrete vendor model ("gemini-2.5-flash", "gpt-4o", "claude-sonnet-4-20250514").
 # - messages: provider-neutral conversation history.
-# - role: usually user, assistant, or system.
+# - role: user, assistant, or system.
 # - content: text sent to the LLM.
 # - maxTokens: optional completion token limit.
 # - temperature: optional randomness value between 0 and 2.
-# - strategy: LeastLatency, RoundRobin, or PriorityWithFallback.
+# - strategy: LeastLatency, LowestCost, RoundRobin, or PriorityWithFallback.
+
 ### Built-in health check
 GET {{LlmRouter_HostAddress}}/health
 
@@ -16,11 +17,15 @@ GET {{LlmRouter_HostAddress}}/health
 GET {{LlmRouter_HostAddress}}/health/providers
 Accept: application/json
 
+### Model aliases and pricing catalog
+GET {{LlmRouter_HostAddress}}/v1/models
+Accept: application/json
+
 ### OpenAPI document
 GET {{LlmRouter_HostAddress}}/openapi/v1.json
 Accept: application/json
 
-### Chat smoke test - Gemini
+### Chat smoke test using logical tier + LowestCost
 POST {{LlmRouter_HostAddress}}/v1/chat
 Content-Type: application/json
 Accept: application/json
@@ -29,13 +34,49 @@ Accept: application/json
   "model": "{{Model}}",
   "messages": [
     {
+      "role": "system",
+      "content": "Be concise and technical."
+    },
+    {
       "role": "user",
       "content": "Explain in three concise bullets what problem a multi-provider LLM router solves."
     }
   ],
   "maxTokens": 200,
   "temperature": 0.2,
-  "strategy": "PriorityWithFallback"
+  "strategy": "LowestCost"
+}
+
+### Streaming SSE chat completion
+POST {{LlmRouter_HostAddress}}/v1/chat/stream
+Content-Type: application/json
+Accept: text/event-stream
+
+{
+  "model": "balanced",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Stream a short explanation of circuit breaker half-open probing."
+    }
+  ],
+  "strategy": "LeastLatency"
+}
+
+### OpenAI-compatible endpoint
+POST {{LlmRouter_HostAddress}}/v1/chat/completions
+Content-Type: application/json
+X-Routing-Strategy: RoundRobin
+
+{
+  "model": "fast",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Hello via OpenAI-compatible contract!"
+    }
+  ],
+  "stream": false
 }
 
 ### Validation failure example
@@ -63,4 +104,3 @@ Accept: application/json
     }
   ]
 }
-

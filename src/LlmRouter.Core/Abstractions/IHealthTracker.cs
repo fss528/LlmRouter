@@ -31,4 +31,15 @@ public interface IHealthTracker
     /// Updates the externally observed health state for a provider.
     /// </summary>
     void UpdateHealth(string providerName, bool isHealthy);
+
+    /// <summary>
+    /// Attempts to claim the single-flight probe slot when a provider circuit is <see cref="CircuitState.HalfOpen"/>.
+    /// </summary>
+    /// <returns><see langword="true"/> when this caller may probe the provider; otherwise <see langword="false"/>.</returns>
+    bool TryAcquireHalfOpenProbe(string providerName);
+
+    /// <summary>
+    /// Releases a previously acquired <see cref="CircuitState.HalfOpen"/> probe slot if the probe was aborted or skipped.
+    /// </summary>
+    void ReleaseHalfOpenProbe(string providerName);
 }

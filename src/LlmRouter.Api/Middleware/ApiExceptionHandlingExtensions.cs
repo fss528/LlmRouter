@@ -1,3 +1,4 @@
+using LlmRouter.Core.Services;
 using Microsoft.AspNetCore.Diagnostics;
 
 namespace LlmRouter.Api.Middleware;
@@ -37,5 +38,26 @@ public static class ApiExceptionHandlingExtensions
                     .ConfigureAwait(false);
             });
         });
+    }
+
+    internal static IResult MapDomainFailure(Exception exception)
+    {
+        return exception switch
+        {
+            UnsupportedModelException unsupported => Results.BadRequest(new { error = unsupported.Message }),
+            ProviderClientException clientEx => Results.Problem(
+                title: "Upstream provider rejected the request payload",
+                detail: clientEx.Message,
+                statusCode: StatusCodes.Status400BadRequest,
+                extensions: new Dictionary<string, object?> { ["provider"] = clientEx.ProviderName }),
+            AllProvidersFailedException allFailed => Results.Problem(
+                title: "All providers failed",
+                detail: allFailed.InnerException?.Message ?? allFailed.Message,
+                statusCode: StatusCodes.Status503ServiceUnavailable,
+                extensions: new Dictionary<string, object?> { ["attempts"] = allFailed.Attempts }),
+            _ => Results.Problem(
+                title: "An error occurred while processing your request.",
+                statusCode: StatusCodes.Status500InternalServerError)
+        };
     }
 }

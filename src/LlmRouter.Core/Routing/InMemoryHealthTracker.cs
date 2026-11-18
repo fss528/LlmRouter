@@ -4,12 +4,9 @@ using LlmRouter.Core.Models;
 namespace LlmRouter.Core.Routing;
 
 /// <summary>
-/// Thread-safe in-memory health tracker with sliding-window error rates and a simple circuit breaker.
+/// Thread-safe in-memory health tracker with sliding-window error rates, P95 latency tracking,
+/// and single-flight <see cref="CircuitState.HalfOpen"/> probe gating.
 /// </summary>
-/// <remarks>
-/// This implementation is appropriate for a single process. Multi-instance deployments should replace it with
-/// a Redis-backed implementation so circuit state and metrics are shared across replicas.
-/// </remarks>
 public sealed class InMemoryHealthTracker : IHealthTracker
 {
     private static readonly TimeSpan ErrorWindow = TimeSpan.FromMinutes(5);
@@ -93,6 +90,7 @@ public sealed class InMemoryHealthTracker : IHealthTracker
                 state.OpenedAt = null;
             }
 
+            state.HalfOpenProbeInFlight = false;
             state.IsHealthy = true;
             state.LastChecked = now;
         }
@@ -111,6 +109,7 @@ public sealed class InMemoryHealthTracker : IHealthTracker
             state.Requests.Enqueue(now);
             state.Failures.Enqueue(now);
             state.IsHealthy = false;
+            state.HalfOpenProbeInFlight = false;
 
             if (state.CircuitState == CircuitState.HalfOpen)
             {
@@ -135,8 +134,41 @@ public sealed class InMemoryHealthTracker : IHealthTracker
             DateTimeOffset now = _timeProvider.GetUtcNow();
             PurgeOldSamples(state, now);
             MoveOpenCircuitToHalfOpenWhenReady(state, now);
-            state.IsHealthy = isHealthy;
+            // Do not allow background model probes to mask an open circuit.
+            state.IsHealthy = state.CircuitState == CircuitState.Open ? false : isHealthy;
             state.LastChecked = now;
+        }
+    }
+
+    /// <inheritdoc />
+    public bool TryAcquireHalfOpenProbe(string providerName)
+    {
+        ProviderState state = GetOrCreateState(providerName);
+
+        lock (state.Sync)
+        {
+            DateTimeOffset now = _timeProvider.GetUtcNow();
+            PurgeOldSamples(state, now);
+            MoveOpenCircuitToHalfOpenWhenReady(state, now);
+
+            if (state.CircuitState != CircuitState.HalfOpen || state.HalfOpenProbeInFlight)
+            {
+                return false;
+            }
+
+            state.HalfOpenProbeInFlight = true;
+            return true;
+        }
+    }
+
+    /// <inheritdoc />
+    public void ReleaseHalfOpenProbe(string providerName)
+    {
+        ProviderState state = GetOrCreateState(providerName);
+
+        lock (state.Sync)
+        {
+            state.HalfOpenProbeInFlight = false;
         }
     }
 
@@ -177,6 +209,7 @@ public sealed class InMemoryHealthTracker : IHealthTracker
             if (now - openedAt >= OpenToHalfOpenAfter)
             {
                 state.CircuitState = CircuitState.HalfOpen;
+                state.HalfOpenProbeInFlight = false;
             }
         }
     }
@@ -206,13 +239,21 @@ public sealed class InMemoryHealthTracker : IHealthTracker
         state.CircuitState = CircuitState.Open;
         state.OpenedAt = now;
         state.IsHealthy = false;
+        state.HalfOpenProbeInFlight = false;
     }
 
     private static ProviderHealth CreateHealthSnapshot(string providerName, ProviderState state, DateTimeOffset now)
     {
         double errorRate = state.Requests.Count == 0 ? 0 : (double)state.Failures.Count / state.Requests.Count;
         double p95Latency = CalculateP95Latency(state.LatencySamples);
-        return new ProviderHealth(providerName, state.IsHealthy, p95Latency, errorRate, now, state.CircuitState);
+        return new ProviderHealth(
+            providerName,
+            state.IsHealthy,
+            p95Latency,
+            errorRate,
+            now,
+            state.CircuitState,
+            state.LatencySamples.Count);
     }
 
     private static double CalculateP95Latency(IEnumerable<long> samples)
@@ -242,5 +283,6 @@ public sealed class InMemoryHealthTracker : IHealthTracker
         public DateTimeOffset LastChecked { get; set; }
         public CircuitState CircuitState { get; set; } = CircuitState.Closed;
         public DateTimeOffset? OpenedAt { get; set; }
+        public bool HalfOpenProbeInFlight { get; set; }
     }
 }

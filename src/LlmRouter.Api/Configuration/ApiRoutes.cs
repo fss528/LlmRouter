@@ -8,8 +8,17 @@ public static class ApiRoutes
     /// <summary>Version 1 API route prefix.</summary>
     public const string V1Prefix = "/v1";
 
-    /// <summary>Chat completion endpoint route.</summary>
+    /// <summary>Provider-neutral chat completion endpoint route.</summary>
     public const string Chat = "/chat";
+
+    /// <summary>Server-Sent Events streaming chat endpoint route.</summary>
+    public const string ChatStream = "/chat/stream";
+
+    /// <summary>OpenAI-compatible chat completions endpoint route.</summary>
+    public const string OpenAiChatCompletions = "/chat/completions";
+
+    /// <summary>Model catalog, aliases, and pricing discovery route.</summary>
+    public const string Models = "/models";
 
     /// <summary>Provider health endpoint route.</summary>
     public const string ProviderHealth = "/health/providers";

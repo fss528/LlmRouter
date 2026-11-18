@@ -5,17 +5,26 @@ namespace LlmRouter.Core.Routing;
 
 internal sealed class RoundRobinRoutingStrategy : IRoutingStrategy
 {
-    private long _counter = -1;
+    private readonly IRoundRobinState _state;
 
-    public IReadOnlyList<ILlmProvider> Order(IReadOnlyList<ILlmProvider> providers, ChatRequest request)
+    public RoundRobinRoutingStrategy(IRoundRobinState state)
     {
-        if (providers.Count <= 1)
+        _state = state;
+    }
+
+    public IReadOnlyList<ProviderRoute> Order(
+        IReadOnlyList<ProviderRoute> routes,
+        IReadOnlyDictionary<string, ProviderHealth> healthByProvider,
+        ChatRequest request)
+    {
+        if (routes.Count <= 1)
         {
-            return providers;
+            return routes;
         }
 
-        long next = Interlocked.Increment(ref _counter);
-        int offset = (int)(next % providers.Count);
-        return providers.Skip(offset).Concat(providers.Take(offset)).ToList();
+        string routeKey = string.Join('|', routes.Select(r => $"{r.Provider.Name}:{r.Model}"));
+        long next = _state.Next(routeKey);
+        int offset = (int)((ulong)next % (uint)routes.Count);
+        return routes.Skip(offset).Concat(routes.Take(offset)).ToList();
     }
 }

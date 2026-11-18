@@ -5,18 +5,26 @@ namespace LlmRouter.Core.Routing;
 
 internal sealed class LeastLatencyRoutingStrategy : IRoutingStrategy
 {
-    private readonly IHealthTracker _healthTracker;
-
-    public LeastLatencyRoutingStrategy(IHealthTracker healthTracker)
+    public IReadOnlyList<ProviderRoute> Order(
+        IReadOnlyList<ProviderRoute> routes,
+        IReadOnlyDictionary<string, ProviderHealth> healthByProvider,
+        ChatRequest request)
     {
-        _healthTracker = healthTracker;
+        return routes
+            .Select((route, index) => (Route: route, Index: index, Key: GetSortKey(route, healthByProvider)))
+            .OrderBy(item => item.Key.UnmeasuredRank)
+            .ThenBy(item => item.Key.P95LatencyMs)
+            .ThenBy(item => item.Index)
+            .Select(item => item.Route)
+            .ToList();
     }
 
-    public IReadOnlyList<ILlmProvider> Order(IReadOnlyList<ILlmProvider> providers, ChatRequest request)
+    private static (int UnmeasuredRank, double P95LatencyMs) GetSortKey(
+        ProviderRoute route,
+        IReadOnlyDictionary<string, ProviderHealth> healthByProvider)
     {
-        return providers
-            .OrderBy(provider => _healthTracker.GetHealth(provider.Name).P95LatencyMs)
-            .ThenBy(provider => provider.Name, StringComparer.Ordinal)
-            .ToList();
+        ProviderHealth health = healthByProvider[route.Provider.Name];
+        bool hasMeasuredLatency = health.LatencySampleCount > 0 || health.P95LatencyMs > 0;
+        return hasMeasuredLatency ? (0, health.P95LatencyMs) : (1, double.MaxValue);
     }
 }

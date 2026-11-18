@@ -13,7 +13,7 @@ public interface ILlmProvider
     string Name { get; }
 
     /// <summary>
-    /// Logical model names supported by this provider.
+    /// Logical or concrete model names supported by this provider.
     /// </summary>
     IReadOnlySet<string> SupportedModels { get; }
 
@@ -21,6 +21,11 @@ public interface ILlmProvider
     /// Executes a provider-specific completion request.
     /// </summary>
     Task<ChatResponse> CompleteAsync(ChatRequest request, CancellationToken ct = default);
+
+    /// <summary>
+    /// Executes a streaming provider-specific completion request.
+    /// </summary>
+    IAsyncEnumerable<ChatStreamChunk> CompleteStreamAsync(ChatRequest request, CancellationToken ct = default);
 
     /// <summary>
     /// Executes a lightweight provider health check.
