@@ -30,8 +30,9 @@ logs/
 appsettings.Local.json
 appsettings.*.Local.json
 
-# Coverage
+# Coverage & Benchmarks
 coverage/
 coverage.*
 *.coverage
 *.coveragexml
+BenchmarkDotNet.Artifacts/
