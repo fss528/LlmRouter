@@ -11,8 +11,8 @@ permissions:
 
 jobs:
   build-and-test:
-    name: Build and test
-    runs-on: windows-latest
+    name: Build, Test & Coverage
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
@@ -29,5 +29,8 @@ jobs:
       - name: Build
         run: dotnet build LlmRouter.sln --configuration Release --no-restore
 
-      - name: Test
-        run: dotnet test LlmRouter.sln --configuration Release --no-build --verbosity normal
+      - name: Test with coverage
+        run: dotnet test LlmRouter.sln --configuration Release --no-build --verbosity normal --collect:"XPlat Code Coverage"
+
+      - name: Build Docker image
+        run: docker build -t llmrouter:ci .

@@ -1,0 +1,12 @@
+**/.git
+**/.vs
+**/.idea
+**/.vscode
+**/bin
+**/obj
+**/TestResults
+**/coverage
+.env
+.env.*
+!.env.example
+*.log
